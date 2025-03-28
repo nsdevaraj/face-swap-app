@@ -325,45 +325,61 @@ function handleFileUpload(event) {
         previewContainer.innerHTML = "";
         previewContainer.appendChild(img);
 
-        // Store the uploaded face image for processing
-        uploadedFace = cv.imread(img);
+        try {
+          // Create a temporary canvas to ensure proper image format
+          const tempCanvas = document.createElement("canvas");
+          tempCanvas.width = img.width;
+          tempCanvas.height = img.height;
+          const tempCtx = tempCanvas.getContext("2d");
+          tempCtx.drawImage(img, 0, 0);
 
-        // Detect faces in the uploaded image to verify it contains a face
-        let uploadedGray = new cv.Mat();
-        let uploadedFaces = new cv.RectVector();
+          // Store the uploaded face image for processing
+          uploadedFace = cv.imread(tempCanvas);
 
-        // Convert to grayscale for face detection
-        cv.cvtColor(uploadedFace, uploadedGray, cv.COLOR_RGBA2GRAY);
+          // Detect faces in the uploaded image to verify it contains a face
+          let uploadedGray = new cv.Mat();
+          let uploadedFaces = new cv.RectVector();
 
-        // Detect faces in the uploaded image
-        faceCascade.detectMultiScale(uploadedGray, uploadedFaces, 1.1, 3, 0);
+          // Convert to grayscale for face detection
+          cv.cvtColor(uploadedFace, uploadedGray, cv.COLOR_RGBA2GRAY);
 
-        if (uploadedFaces.size() > 0) {
-          // Enable the start button if a face is detected
-          document.getElementById("startButton").disabled = false;
-          document.getElementById(
-            "statusMessage"
-          ).textContent = `Face detected in uploaded image. Click "Start Face Swap" to begin.`;
+          // Detect faces in the uploaded image
+          faceCascade.detectMultiScale(uploadedGray, uploadedFaces, 1.1, 3, 0);
 
-          // Draw rectangle around the detected face in the preview
-          let face = uploadedFaces.get(0);
-          let point1 = new cv.Point(face.x, face.y);
-          let point2 = new cv.Point(face.x + face.width, face.y + face.height);
-          cv.rectangle(uploadedFace, point1, point2, [0, 255, 0, 255], 2);
+          if (uploadedFaces.size() > 0) {
+            // Enable the start button if a face is detected
+            document.getElementById("startButton").disabled = false;
+            document.getElementById(
+              "statusMessage"
+            ).textContent = `Face detected in uploaded image. Click "Start Face Swap" to begin.`;
 
-          // Display the annotated image
-          let canvas = document.createElement("canvas");
-          previewContainer.innerHTML = "";
-          previewContainer.appendChild(canvas);
-          cv.imshow(canvas, uploadedFace);
-        } else {
+            // Draw rectangle around the detected face in the preview
+            let face = uploadedFaces.get(0);
+            let point1 = new cv.Point(face.x, face.y);
+            let point2 = new cv.Point(
+              face.x + face.width,
+              face.y + face.height
+            );
+            cv.rectangle(uploadedFace, point1, point2, [0, 255, 0, 255], 2);
+
+            // Display the annotated image
+            let canvas = document.createElement("canvas");
+            previewContainer.innerHTML = "";
+            previewContainer.appendChild(canvas);
+            cv.imshow(canvas, uploadedFace);
+          } else {
+            document.getElementById("statusMessage").textContent =
+              "No face detected in the uploaded image. Please upload a different image.";
+          }
+
+          // Clean up
+          uploadedGray.delete();
+          uploadedFaces.delete();
+        } catch (error) {
+          console.error("Error processing uploaded image:", error);
           document.getElementById("statusMessage").textContent =
-            "No face detected in the uploaded image. Please upload a different image.";
+            "Error processing uploaded image. Please try a different image.";
         }
-
-        // Clean up
-        uploadedGray.delete();
-        uploadedFaces.delete();
       };
     };
 
