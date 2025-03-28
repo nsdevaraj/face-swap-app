@@ -41,6 +41,14 @@ function extractFaceFromUploadedImage(uploadedImage, faceRect) {
     // Extract face region from uploaded image
     let extractedFace = uploadedImage.roi(rect).clone();
 
+    // Convert extracted face to RGBA if it's not already
+    if (extractedFace.channels() === 3) {
+      let rgbaFace = new cv.Mat();
+      cv.cvtColor(extractedFace, rgbaFace, cv.COLOR_RGB2RGBA);
+      extractedFace.delete();
+      extractedFace = rgbaFace;
+    }
+
     // Create a mask for the face (elliptical shape works better than rectangle)
     let mask = new cv.Mat.zeros(h, w, cv.CV_8UC1);
 
@@ -68,10 +76,77 @@ function extractFaceFromUploadedImage(uploadedImage, faceRect) {
     // Apply some blur to the mask edges for better blending
     cv.GaussianBlur(mask, mask, new cv.Size(21, 21), 11, 11);
 
-    console.log("Successfully extracted face", w, "x", h);
+    // Apply the mask to the face to create transparency
+    // First convert mask to 4-channel
+    let mask4 = new cv.Mat();
+    cv.cvtColor(mask, mask4, cv.COLOR_GRAY2RGBA);
+
+    // Scale mask from 0-255 to 0-1 range for alpha blending
+    let normMask = new cv.Mat();
+    mask4.convertTo(normMask, cv.CV_32FC4, 1.0 / 255.0);
+
+    // Convert face to floating point for multiplication
+    let faceFloat = new cv.Mat();
+    extractedFace.convertTo(faceFloat, cv.CV_32FC4);
+
+    // Create direct alpha mask
+    let alphaMask = new cv.Mat();
+    cv.cvtColor(mask, alphaMask, cv.COLOR_GRAY2RGBA);
+
+    // Apply mask to face
+    let result = new cv.Mat();
+    result = extractedFace.clone();
+
+    // Directly set alpha channel (more reliable approach)
+    let srcChannels = new cv.MatVector();
+    cv.split(result, srcChannels);
+
+    // Make sure we have 4 channels
+    if (srcChannels.size() === 4) {
+      // Replace alpha channel directly with mask
+      mask.copyTo(srcChannels.get(3));
+
+      // Merge channels back
+      cv.merge(srcChannels, result);
+      console.log("Applied mask directly to alpha channel");
+    } else {
+      console.error("Expected 4 channels but got", srcChannels.size());
+    }
+
+    // Clean up temporary matrices
+    mask4.delete();
+    normMask.delete();
+    faceFloat.delete();
+    alphaMask.delete();
+    srcChannels.delete();
+    extractedFace.delete();
+
+    console.log("Successfully extracted face with transparency", w, "x", h);
+
+    // Verify alpha channel is properly set
+    let debugChannels = new cv.MatVector();
+    cv.split(result, debugChannels);
+    if (debugChannels.size() === 4) {
+      // Check if alpha channel has values (not all 0 or 255)
+      let alphaChannel = debugChannels.get(3);
+      let minMax = cv.minMaxLoc(alphaChannel);
+      console.log("Alpha channel min/max:", minMax.minVal, minMax.maxVal);
+
+      // If all alpha values are the same, we don't have proper transparency
+      if (minMax.minVal === minMax.maxVal) {
+        console.warn(
+          "Alpha channel appears to be uniform - transparency may not work!"
+        );
+      } else {
+        console.log(
+          "Alpha channel has varying values - transparency should work"
+        );
+      }
+    }
+    debugChannels.delete();
 
     return {
-      face: extractedFace,
+      face: result,
       mask: mask,
     };
   } catch (error) {
@@ -316,6 +391,31 @@ function swapFaces(sourceImage, targetFrame, targetFaces) {
       aligned.mask,
       targetFaceRect
     );
+
+    // Apply color correction to better match skin tones
+    try {
+      // Extract target face region for color matching
+      let targetFaceRegion = targetFrame
+        .roi(
+          new cv.Rect(
+            targetFaceRect.x,
+            targetFaceRect.y,
+            targetFaceRect.width,
+            targetFaceRect.height
+          )
+        )
+        .clone();
+
+      console.log("Applying color correction for better skin tone matching");
+      let colorCorrected = colorCorrectFace(result, targetFaceRegion);
+      result.delete();
+      result = colorCorrected;
+
+      targetFaceRegion.delete();
+    } catch (error) {
+      console.error("Error in color correction:", error);
+      // Continue with uncorrected result
+    }
 
     // Clean up
     aligned.face.delete();
