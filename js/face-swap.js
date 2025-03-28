@@ -18,8 +18,8 @@ function extractFaceFromUploadedImage(uploadedImage, faceRect) {
       return null;
     }
 
-    // Get dimensions from the face rectangle (with some margin for better results)
-    const margin = 0.2; // 20% margin around the face
+    // Get dimensions from the face rectangle (with improved margin for better feature capture)
+    const margin = 0.25; // 25% margin around the face to ensure all features are captured
     const width = faceRect.width;
     const height = faceRect.height;
 
@@ -49,12 +49,53 @@ function extractFaceFromUploadedImage(uploadedImage, faceRect) {
       extractedFace = rgbaFace;
     }
 
-    // Create a mask for the face (elliptical shape works better than rectangle)
+    // Enhance the extracted face to emphasize facial features
+    let enhancedFace = new cv.Mat();
+    let grayFace = new cv.Mat();
+
+    // Convert to grayscale for feature detection
+    cv.cvtColor(extractedFace, grayFace, cv.COLOR_RGBA2GRAY);
+
+    // Enhance contrast using CLAHE
+    let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+    let enhancedGray = new cv.Mat();
+    clahe.apply(grayFace, enhancedGray);
+
+    // Detect edges for facial features
+    let edges = new cv.Mat();
+    cv.Canny(enhancedGray, edges, 30, 120);
+
+    // Use morphological operations to refine facial feature detection
+    let featureKernel = cv.Mat.ones(2, 2, cv.CV_8U);
+    let featuresRefined = new cv.Mat();
+
+    // Close small gaps in feature edges
+    cv.morphologyEx(edges, featuresRefined, cv.MORPH_CLOSE, featureKernel);
+
+    // Dilate to create more prominent feature areas
+    let featuresMask = new cv.Mat();
+    cv.dilate(
+      featuresRefined,
+      featuresMask,
+      featureKernel,
+      new cv.Point(-1, -1),
+      1
+    );
+
+    // Create a mask for the face with an improved shape that better matches facial contours
+    // Start with an elliptical mask as the base
     let mask = new cv.Mat.zeros(h, w, cv.CV_8UC1);
 
-    // Calculate ellipse dimensions and position
-    let center = new cv.Point(Math.floor(w / 2), Math.floor(h / 2));
-    let axes = new cv.Size(Math.floor(w / 2.2), Math.floor(h / 2.2)); // Slightly smaller than the ROI
+    // Calculate ellipse dimensions and position for a better face shape
+    let centerX = Math.floor(w / 2);
+    let centerY = Math.floor(h / 2);
+    let center = new cv.Point(centerX, centerY);
+
+    // Adjust the axes for a more natural face shape (slightly wider in the middle)
+    let axesX = Math.floor(w / 2.1); // Slightly larger horizontally
+    let axesY = Math.floor(h / 2.1);
+    let axes = new cv.Size(axesX, axesY);
+
     let angle = 0;
     let startAngle = 0;
     let endAngle = 360;
@@ -73,82 +114,90 @@ function extractFaceFromUploadedImage(uploadedImage, faceRect) {
       thickness
     );
 
+    // Expand the mask in the chin area to better match human face shape
+    // Define chin region (bottom third of the face)
+    let chinRegionY = centerY + Math.floor(axesY * 0.3);
+    let chinWidth = Math.floor(axesX * 0.8);
+
+    // Draw additional shape for chin area
+    let chinPts = new cv.MatVector();
+    let chinContour = new cv.Mat(6, 1, cv.CV_32SC2);
+
+    // Define the chin shape points
+    chinContour.data32S[0] = centerX - chinWidth; // Bottom left
+    chinContour.data32S[1] = chinRegionY;
+    chinContour.data32S[2] = centerX; // Bottom middle
+    chinContour.data32S[3] = Math.min(
+      h - 1,
+      chinRegionY + Math.floor(axesY * 0.4)
+    );
+    chinContour.data32S[4] = centerX + chinWidth; // Bottom right
+    chinContour.data32S[5] = chinRegionY;
+    chinContour.data32S[6] = centerX + chinWidth; // Right
+    chinContour.data32S[7] = chinRegionY;
+    chinContour.data32S[8] = centerX - chinWidth; // Left
+    chinContour.data32S[9] = chinRegionY;
+    chinContour.data32S[10] = centerX - chinWidth; // Close the contour
+    chinContour.data32S[11] = chinRegionY;
+
+    chinPts.push_back(chinContour);
+    cv.fillPoly(mask, chinPts, color);
+
     // Apply some blur to the mask edges for better blending
     cv.GaussianBlur(mask, mask, new cv.Size(21, 21), 11, 11);
 
+    // Combine the mask with detected facial features to ensure important features are preserved
+    let combinedMask = new cv.Mat();
+    cv.bitwise_or(mask, featuresMask, combinedMask);
+
+    // Smooth the final mask
+    let finalMask = new cv.Mat();
+    cv.GaussianBlur(combinedMask, finalMask, new cv.Size(7, 7), 3, 3);
+
     // Apply the mask to the face to create transparency
-    // First convert mask to 4-channel
-    let mask4 = new cv.Mat();
-    cv.cvtColor(mask, mask4, cv.COLOR_GRAY2RGBA);
-
-    // Scale mask from 0-255 to 0-1 range for alpha blending
-    let normMask = new cv.Mat();
-    mask4.convertTo(normMask, cv.CV_32FC4, 1.0 / 255.0);
-
-    // Convert face to floating point for multiplication
-    let faceFloat = new cv.Mat();
-    extractedFace.convertTo(faceFloat, cv.CV_32FC4);
-
-    // Create direct alpha mask
-    let alphaMask = new cv.Mat();
-    cv.cvtColor(mask, alphaMask, cv.COLOR_GRAY2RGBA);
-
-    // Apply mask to face
-    let result = new cv.Mat();
-    result = extractedFace.clone();
-
-    // Directly set alpha channel (more reliable approach)
     let srcChannels = new cv.MatVector();
-    cv.split(result, srcChannels);
+    cv.split(extractedFace, srcChannels);
 
     // Make sure we have 4 channels
     if (srcChannels.size() === 4) {
-      // Replace alpha channel directly with mask
-      mask.copyTo(srcChannels.get(3));
+      // Replace alpha channel with our enhanced mask
+      finalMask.copyTo(srcChannels.get(3));
 
       // Merge channels back
+      let result = new cv.Mat();
       cv.merge(srcChannels, result);
-      console.log("Applied mask directly to alpha channel");
+      console.log("Applied enhanced mask to alpha channel");
+
+      // Clean up
+      srcChannels.delete();
+      extractedFace.delete();
+      grayFace.delete();
+      clahe.delete();
+      enhancedGray.delete();
+      edges.delete();
+      featureKernel.delete();
+      featuresRefined.delete();
+      featuresMask.delete();
+      combinedMask.delete();
+      chinPts.delete();
+      chinContour.delete();
+
+      console.log(
+        "Successfully extracted face with improved feature detection",
+        w,
+        "x",
+        h
+      );
+
+      return {
+        face: result,
+        mask: finalMask,
+      };
     } else {
       console.error("Expected 4 channels but got", srcChannels.size());
+      srcChannels.delete();
+      return null;
     }
-
-    // Clean up temporary matrices
-    mask4.delete();
-    normMask.delete();
-    faceFloat.delete();
-    alphaMask.delete();
-    srcChannels.delete();
-    extractedFace.delete();
-
-    console.log("Successfully extracted face with transparency", w, "x", h);
-
-    // Verify alpha channel is properly set
-    let debugChannels = new cv.MatVector();
-    cv.split(result, debugChannels);
-    if (debugChannels.size() === 4) {
-      // Check if alpha channel has values (not all 0 or 255)
-      let alphaChannel = debugChannels.get(3);
-      let minMax = cv.minMaxLoc(alphaChannel);
-      console.log("Alpha channel min/max:", minMax.minVal, minMax.maxVal);
-
-      // If all alpha values are the same, we don't have proper transparency
-      if (minMax.minVal === minMax.maxVal) {
-        console.warn(
-          "Alpha channel appears to be uniform - transparency may not work!"
-        );
-      } else {
-        console.log(
-          "Alpha channel has varying values - transparency should work"
-        );
-      }
-    }
-    debugChannels.delete();
-
-    return {
-      face: result,
-      mask: mask,
-    };
   } catch (error) {
     console.error("Error in extractFaceFromUploadedImage:", error);
     return null;
@@ -192,8 +241,45 @@ function alignFace(sourceFace, sourceMask, targetFaceRect) {
       cv.INTER_LINEAR
     );
 
+    // Apply additional processing to enhance the facial features
+    // Apply adaptive sharpening to preserve facial feature details
+    let sharpenKernel = new cv.Mat(3, 3, cv.CV_32FC1);
+    let sharpenData = sharpenKernel.data32F;
+    sharpenData[0] = 0;
+    sharpenData[1] = -1;
+    sharpenData[2] = 0;
+    sharpenData[3] = -1;
+    sharpenData[4] = 5;
+    sharpenData[5] = -1;
+    sharpenData[6] = 0;
+    sharpenData[7] = -1;
+    sharpenData[8] = 0;
+
+    // Create a sharpened version of the face
+    let sharpened = new cv.Mat();
+    cv.filter2D(
+      resizedFace,
+      sharpened,
+      -1,
+      sharpenKernel,
+      new cv.Point(-1, -1),
+      0,
+      cv.BORDER_DEFAULT
+    );
+
+    // Blend the original with the sharpened version for a more natural look
+    let alpha = 0.7; // Adjust this value to control sharpening intensity
+    let beta = 1.0 - alpha;
+    let enhancedFace = new cv.Mat();
+    cv.addWeighted(resizedFace, alpha, sharpened, beta, 0, enhancedFace);
+
+    // Clean up temporary matrices
+    sharpenKernel.delete();
+    sharpened.delete();
+    resizedFace.delete();
+
     return {
-      face: resizedFace,
+      face: enhancedFace,
       mask: resizedMask,
     };
   } catch (error) {
@@ -202,7 +288,7 @@ function alignFace(sourceFace, sourceMask, targetFaceRect) {
   }
 }
 
-// Blend the warped source face onto the target frame
+// Blend the warped source face onto the target frame with interlacing
 function blendFaces(targetFrame, warpedFace, warpedMask, targetFaceRect) {
   try {
     // Validate inputs
@@ -214,7 +300,7 @@ function blendFaces(targetFrame, warpedFace, warpedMask, targetFaceRect) {
     // Create a copy of the target frame
     let result = targetFrame.clone();
 
-    // Declare these variables at the top level of the function
+    // Declare variables
     let resizedFace = null;
     let resizedMask = null;
 
@@ -230,67 +316,160 @@ function blendFaces(targetFrame, warpedFace, warpedMask, targetFaceRect) {
       return result;
     }
 
-    // Extract the ROI using submat instead of direct constructor
+    // Extract the ROI
     let rect = new cv.Rect(x, y, width, height);
     let roi = result.roi(rect);
 
-    // Ensure warped face and mask dimensions match ROI
+    // Extract the target face region
+    let targetFaceRegion = roi.clone();
+
+    // Ensure warped face dimensions match
     if (
       warpedFace.rows !== height ||
       warpedFace.cols !== width ||
       warpedMask.rows !== height ||
       warpedMask.cols !== width
     ) {
-      console.warn(
-        "Dimension mismatch in blendFaces, resizing warped face and mask"
-      );
-
       resizedFace = new cv.Mat();
       resizedMask = new cv.Mat();
-
-      let dstSize = new cv.Size(width, height);
-      cv.resize(warpedFace, resizedFace, dstSize);
-      cv.resize(warpedMask, resizedMask, dstSize);
-
-      // Use the resized versions
+      cv.resize(warpedFace, resizedFace, new cv.Size(width, height));
+      cv.resize(warpedMask, resizedMask, new cv.Size(width, height));
       warpedFace = resizedFace;
       warpedMask = resizedMask;
     }
 
-    // Create temporary matrices for blending
-    let foreground = new cv.Mat();
-    let background = new cv.Mat();
+    // Convert to grayscale for feature detection
+    let graySource = new cv.Mat();
+    let grayTarget = new cv.Mat();
+    cv.cvtColor(warpedFace, graySource, cv.COLOR_RGBA2GRAY);
+    cv.cvtColor(targetFaceRegion, grayTarget, cv.COLOR_RGBA2GRAY);
 
-    // Create normalized masks for blending
-    let maskNorm = new cv.Mat();
+    // Apply CLAHE for better feature contrast
+    let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+    let enhancedSource = new cv.Mat();
+    let enhancedTarget = new cv.Mat();
+    clahe.apply(graySource, enhancedSource);
+    clahe.apply(grayTarget, enhancedTarget);
+
+    // Detect features using Canny edge detection
+    let sourceEdges = new cv.Mat();
+    let targetEdges = new cv.Mat();
+    cv.Canny(enhancedSource, sourceEdges, 30, 120);
+    cv.Canny(enhancedTarget, targetEdges, 30, 120);
+
+    // Create feature masks
+    let sourceMorphKernel = cv.Mat.ones(2, 2, cv.CV_8U);
+    let targetMorphKernel = cv.Mat.ones(2, 2, cv.CV_8U);
+
+    let sourceFeatures = new cv.Mat();
+    let targetFeatures = new cv.Mat();
+
+    // Dilate to connect nearby features
+    cv.dilate(
+      sourceEdges,
+      sourceFeatures,
+      sourceMorphKernel,
+      new cv.Point(-1, -1),
+      1
+    );
+    cv.dilate(
+      targetEdges,
+      targetFeatures,
+      targetMorphKernel,
+      new cv.Point(-1, -1),
+      1
+    );
+
+    // Create an improved interlaced pattern based on feature locations
+    // The goal is to preserve source features where important and blend with target elsewhere
+    let featureBasedPattern = new cv.Mat(
+      height,
+      width,
+      cv.CV_32FC1,
+      new cv.Scalar(0)
+    );
+
+    // Convert feature masks to proper format
+    let sourceFeaturesMask = new cv.Mat();
+    let targetFeaturesMask = new cv.Mat();
+    sourceFeatures.convertTo(sourceFeaturesMask, cv.CV_32FC1, 1.0 / 255.0);
+    targetFeatures.convertTo(targetFeaturesMask, cv.CV_32FC1, 1.0 / 255.0);
+
+    // Create base stripe pattern for non-feature areas
+    const stripeWidth = 3; // Width of each stripe in pixels
+    for (let y = 0; y < height; y++) {
+      if (Math.floor(y / stripeWidth) % 2 === 0) {
+        for (let x = 0; x < width; x++) {
+          if (sourceFeaturesMask.floatPtr(y, x)[0] < 0.5) {
+            // Not a strong feature
+            featureBasedPattern.floatPtr(y, x)[0] = 0.7; // Moderate strength for stripes
+          }
+        }
+      }
+    }
+
+    // Add source features more strongly
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (sourceFeaturesMask.floatPtr(y, x)[0] > 0.5) {
+          // Feature found - use full strength
+          featureBasedPattern.floatPtr(y, x)[0] = 1.0;
+        }
+      }
+    }
+
+    // Create blending masks
+    let warpedMaskNorm = new cv.Mat();
+    warpedMask.convertTo(warpedMaskNorm, cv.CV_32FC1, 1 / 255.0);
+
+    let sourceMask = new cv.Mat();
+    let targetMask = new cv.Mat();
     let maskInv = new cv.Mat();
 
-    // Convert mask to proper format and normalize (0-1 range)
-    warpedMask.convertTo(maskNorm, cv.CV_32FC1, 1 / 255.0);
+    // Multiply feature pattern with mask for source face
+    cv.multiply(warpedMaskNorm, featureBasedPattern, sourceMask);
 
-    // Create inverted mask
-    cv.threshold(maskNorm, maskInv, 0, 1, cv.THRESH_BINARY_INV);
+    // Create inverted pattern for target features
+    let invertedPattern = new cv.Mat();
+    cv.subtract(
+      new cv.Mat(height, width, cv.CV_32FC1, new cv.Scalar(1)),
+      featureBasedPattern,
+      invertedPattern
+    );
 
-    // Convert to 4-channel for RGBA multiplication
-    let mask4C = new cv.Mat();
+    // Create target mask with inverted pattern
+    cv.multiply(warpedMaskNorm, invertedPattern, targetMask);
+
+    // Create inverted mask for background
+    cv.threshold(warpedMaskNorm, maskInv, 0, 1, cv.THRESH_BINARY_INV);
+
+    // Convert to 4-channel for blending
+    let sourceMask4C = new cv.Mat();
+    let targetMask4C = new cv.Mat();
     let maskInv4C = new cv.Mat();
-    cv.cvtColor(maskNorm, mask4C, cv.COLOR_GRAY2RGBA);
+    cv.cvtColor(sourceMask, sourceMask4C, cv.COLOR_GRAY2RGBA);
+    cv.cvtColor(targetMask, targetMask4C, cv.COLOR_GRAY2RGBA);
     cv.cvtColor(maskInv, maskInv4C, cv.COLOR_GRAY2RGBA);
 
-    // Convert source and target to floating point for blending
+    // Convert to floating point for blending
+    let foreground = new cv.Mat();
+    let background = new cv.Mat();
     warpedFace.convertTo(foreground, cv.CV_32FC4);
-    roi.convertTo(background, cv.CV_32FC4);
+    targetFaceRegion.convertTo(background, cv.CV_32FC4);
 
-    // Multiply foreground and background by respective masks
-    let maskedFg = new cv.Mat();
-    let maskedBg = new cv.Mat();
+    // Combine the images with their masks
+    let maskedSource = new cv.Mat();
+    let maskedTarget = new cv.Mat();
+    let maskedBackground = new cv.Mat();
+    cv.multiply(foreground, sourceMask4C, maskedSource);
+    cv.multiply(background, targetMask4C, maskedTarget);
+    cv.multiply(background, maskInv4C, maskedBackground);
 
-    cv.multiply(foreground, mask4C, maskedFg);
-    cv.multiply(background, maskInv4C, maskedBg);
-
-    // Add the masked foreground and background
+    // Combine all components
+    let temp = new cv.Mat();
     let blended = new cv.Mat();
-    cv.add(maskedFg, maskedBg, blended);
+    cv.add(maskedSource, maskedTarget, temp);
+    cv.add(temp, maskedBackground, blended);
 
     // Convert back to 8-bit
     blended.convertTo(blended, cv.CV_8UC4);
@@ -300,19 +479,38 @@ function blendFaces(targetFrame, warpedFace, warpedMask, targetFaceRect) {
 
     // Clean up
     roi.delete();
+    targetFaceRegion.delete();
+    if (resizedFace) resizedFace.delete();
+    if (resizedMask) resizedMask.delete();
+    graySource.delete();
+    grayTarget.delete();
+    clahe.delete();
+    enhancedSource.delete();
+    enhancedTarget.delete();
+    sourceEdges.delete();
+    targetEdges.delete();
+    sourceMorphKernel.delete();
+    targetMorphKernel.delete();
+    sourceFeatures.delete();
+    targetFeatures.delete();
+    featureBasedPattern.delete();
+    sourceFeaturesMask.delete();
+    targetFeaturesMask.delete();
+    warpedMaskNorm.delete();
+    sourceMask.delete();
+    targetMask.delete();
+    maskInv.delete();
+    invertedPattern.delete();
+    sourceMask4C.delete();
+    targetMask4C.delete();
+    maskInv4C.delete();
     foreground.delete();
     background.delete();
-    maskNorm.delete();
-    maskInv.delete();
-    mask4C.delete();
-    maskInv4C.delete();
-    maskedFg.delete();
-    maskedBg.delete();
+    maskedSource.delete();
+    maskedTarget.delete();
+    maskedBackground.delete();
+    temp.delete();
     blended.delete();
-
-    // Clean up resized versions if created
-    if (warpedFace !== resizedFace && resizedFace) resizedFace.delete();
-    if (warpedMask !== resizedMask && resizedMask) resizedMask.delete();
 
     return result;
   } catch (error) {
@@ -343,12 +541,25 @@ function swapFaces(sourceImage, targetFrame, targetFaces) {
       // Convert to grayscale for face detection
       cv.cvtColor(sourceImage, sourceGray, cv.COLOR_RGBA2GRAY);
 
-      // Detect faces in the source image
-      faceCascade.detectMultiScale(sourceGray, sourceFaces, 1.1, 3, 0);
+      // Apply histogram equalization to improve detection in different lighting
+      let equalizedGray = new cv.Mat();
+      cv.equalizeHist(sourceGray, equalizedGray);
+
+      // Detect faces in the source image with improved parameters
+      faceCascade.detectMultiScale(
+        equalizedGray, // Input image
+        sourceFaces, // Output vector of detected faces
+        1.1, // Scale factor
+        5, // Min neighbors (higher value = less detections but higher quality)
+        0, // Flags (not used)
+        new cv.Size(60, 60), // Min face size
+        new cv.Size(0, 0) // Max face size (0,0 means no limit)
+      );
 
       // If no faces detected in source, return original frame
       if (sourceFaces.size() === 0) {
         sourceGray.delete();
+        equalizedGray.delete();
         sourceFaces.delete();
         return targetFrame.clone();
       }
@@ -360,6 +571,7 @@ function swapFaces(sourceImage, targetFrame, targetFaces) {
       // If extraction failed, return original frame
       if (!extracted) {
         sourceGray.delete();
+        equalizedGray.delete();
         sourceFaces.delete();
         return targetFrame.clone();
       }
@@ -368,19 +580,43 @@ function swapFaces(sourceImage, targetFrame, targetFaces) {
       sourceFace = extracted.face;
       sourceMask = extracted.mask;
 
+      // Apply feature enhancement to the source face
+      let enhancedSource = enhanceFacialFeatures(sourceFace);
+      sourceFace.delete();
+      sourceFace = enhancedSource;
+
       // Clean up
       sourceGray.delete();
+      equalizedGray.delete();
       sourceFaces.delete();
     }
 
     // Get the first face from target frame
     let targetFaceRect = targetFaces.get(0);
 
+    // Preprocess the target face region to enhance features
+    let targetFaceRegion = targetFrame
+      .roi(
+        new cv.Rect(
+          targetFaceRect.x,
+          targetFaceRect.y,
+          targetFaceRect.width,
+          targetFaceRect.height
+        )
+      )
+      .clone();
+
+    // Enhance the target face features
+    let enhancedTarget = enhanceFacialFeatures(targetFaceRegion);
+    targetFaceRegion.delete();
+    targetFaceRegion = enhancedTarget;
+
     // Align source face to target face
     let aligned = alignFace(sourceFace, sourceMask, targetFaceRect);
 
     // If alignment failed, return original frame
     if (!aligned) {
+      targetFaceRegion.delete();
       return targetFrame.clone();
     }
 
@@ -394,24 +630,10 @@ function swapFaces(sourceImage, targetFrame, targetFaces) {
 
     // Apply color correction to better match skin tones
     try {
-      // Extract target face region for color matching
-      let targetFaceRegion = targetFrame
-        .roi(
-          new cv.Rect(
-            targetFaceRect.x,
-            targetFaceRect.y,
-            targetFaceRect.width,
-            targetFaceRect.height
-          )
-        )
-        .clone();
-
       console.log("Applying color correction for better skin tone matching");
       let colorCorrected = colorCorrectFace(result, targetFaceRegion);
       result.delete();
       result = colorCorrected;
-
-      targetFaceRegion.delete();
     } catch (error) {
       console.error("Error in color correction:", error);
       // Continue with uncorrected result
@@ -420,6 +642,7 @@ function swapFaces(sourceImage, targetFrame, targetFaces) {
     // Clean up
     aligned.face.delete();
     aligned.mask.delete();
+    targetFaceRegion.delete();
 
     return result;
   } catch (error) {
@@ -522,5 +745,169 @@ function colorCorrectFace(sourceFace, targetFace) {
   } catch (error) {
     console.error("Error in colorCorrectFace:", error);
     return sourceFace.clone();
+  }
+}
+
+// Function to enhance facial features
+function enhanceFacialFeatures(faceImage) {
+  try {
+    if (!faceImage) {
+      console.error("Invalid input to enhanceFacialFeatures");
+      return null;
+    }
+
+    // Create a grayscale version for feature detection
+    let grayFace = new cv.Mat();
+    cv.cvtColor(faceImage, grayFace, cv.COLOR_RGBA2GRAY);
+
+    // Apply contrast enhancement
+    let equalizedGray = new cv.Mat();
+    cv.equalizeHist(grayFace, equalizedGray);
+
+    // Apply bilateral filter to smooth skin while preserving edges (increased parameters)
+    let smoothed = new cv.Mat();
+    cv.bilateralFilter(faceImage, smoothed, 11, 90, 90);
+
+    // Define a stronger sharpening kernel to enhance edges (facial features)
+    let sharpenKernel = new cv.Mat(3, 3, cv.CV_32FC1);
+    let sharpenData = sharpenKernel.data32F;
+    sharpenData[0] = -0.5;
+    sharpenData[1] = -1.0;
+    sharpenData[2] = -0.5;
+    sharpenData[3] = -1.0;
+    sharpenData[4] = 7.0;
+    sharpenData[5] = -1.0;
+    sharpenData[6] = -0.5;
+    sharpenData[7] = -1.0;
+    sharpenData[8] = -0.5;
+
+    // Apply sharpening
+    let sharpened = new cv.Mat();
+    cv.filter2D(
+      smoothed,
+      sharpened,
+      -1,
+      sharpenKernel,
+      new cv.Point(-1, -1),
+      0,
+      cv.BORDER_DEFAULT
+    );
+
+    // Create a more sensitive edge mask to identify feature regions
+    let edges = new cv.Mat();
+    cv.Canny(equalizedGray, edges, 30, 120); // Lower thresholds for more detailed edges
+
+    // Apply morphological operations to refine the edges
+    let morphKernel = cv.Mat.ones(2, 2, cv.CV_8U);
+    let refinedEdges = new cv.Mat();
+
+    // Close small gaps in feature edges (important for continuous feature detection)
+    let closedEdges = new cv.Mat();
+    cv.morphologyEx(edges, closedEdges, cv.MORPH_CLOSE, morphKernel);
+
+    // Dilate the edges to create wider feature areas (but not too wide)
+    cv.dilate(closedEdges, refinedEdges, morphKernel, new cv.Point(-1, -1), 1);
+
+    // Convert edge mask to proper format
+    let edgeMask = new cv.Mat();
+    cv.cvtColor(refinedEdges, edgeMask, cv.COLOR_GRAY2RGBA);
+
+    // Normalize the mask
+    let normMask = new cv.Mat();
+    edgeMask.convertTo(normMask, cv.CV_32FC4, 1.0 / 255.0);
+
+    // Create inverse mask
+    let invMask = new cv.Mat();
+    cv.subtract(
+      new cv.Mat(
+        faceImage.rows,
+        faceImage.cols,
+        cv.CV_32FC4,
+        new cv.Scalar(1, 1, 1, 1)
+      ),
+      normMask,
+      invMask
+    );
+
+    // Apply adaptive histogram equalization for better feature contrast
+    let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+    let enhancedGray = new cv.Mat();
+    clahe.apply(equalizedGray, enhancedGray);
+
+    // Convert enhanced gray to color for blending
+    let enhancedColor = new cv.Mat();
+    cv.cvtColor(enhancedGray, enhancedColor, cv.COLOR_GRAY2RGBA);
+
+    // Convert images to floating point
+    let smoothedFloat = new cv.Mat();
+    let sharpenedFloat = new cv.Mat();
+    let enhancedFloat = new cv.Mat();
+
+    smoothed.convertTo(smoothedFloat, cv.CV_32FC4);
+    sharpened.convertTo(sharpenedFloat, cv.CV_32FC4);
+    enhancedColor.convertTo(enhancedFloat, cv.CV_32FC4);
+
+    // Apply feature-aware blending with three components
+    let maskedSmooth = new cv.Mat();
+    let maskedSharp = new cv.Mat();
+    let maskedEnhanced = new cv.Mat();
+    let temp = new cv.Mat();
+    let result = new cv.Mat();
+
+    // Create a special mask for enhanced details
+    let detailMask = new cv.Mat();
+    cv.threshold(normMask, detailMask, 0.5, 1.0, cv.THRESH_BINARY);
+    let detailMask4C = new cv.Mat();
+    cv.cvtColor(detailMask, detailMask4C, cv.COLOR_GRAY2RGBA);
+
+    // Mix the components:
+    // 1. Smooth skin areas
+    cv.multiply(smoothedFloat, invMask, maskedSmooth);
+
+    // 2. Sharpened features
+    cv.multiply(sharpenedFloat, normMask, maskedSharp);
+
+    // 3. Enhanced contrast for important details
+    cv.multiply(enhancedFloat, detailMask4C, maskedEnhanced);
+
+    // Combine all components
+    cv.add(maskedSmooth, maskedSharp, temp);
+    cv.addWeighted(temp, 0.7, maskedEnhanced, 0.3, 0, result);
+
+    // Convert back to 8-bit
+    let result8U = new cv.Mat();
+    result.convertTo(result8U, cv.CV_8UC4);
+
+    // Clean up
+    grayFace.delete();
+    equalizedGray.delete();
+    smoothed.delete();
+    sharpenKernel.delete();
+    sharpened.delete();
+    edges.delete();
+    morphKernel.delete();
+    refinedEdges.delete();
+    closedEdges.delete();
+    edgeMask.delete();
+    normMask.delete();
+    invMask.delete();
+    clahe.delete();
+    enhancedGray.delete();
+    enhancedColor.delete();
+    smoothedFloat.delete();
+    sharpenedFloat.delete();
+    enhancedFloat.delete();
+    maskedSmooth.delete();
+    maskedSharp.delete();
+    maskedEnhanced.delete();
+    temp.delete();
+    result.delete();
+    detailMask.delete();
+    detailMask4C.delete();
+
+    return result8U;
+  } catch (error) {
+    console.error("Error in enhanceFacialFeatures:", error);
+    return faceImage.clone();
   }
 }
