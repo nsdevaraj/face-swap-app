@@ -30,17 +30,15 @@ function extractFaceFromUploadedImage(uploadedImage, faceRect) {
         let roi = new cv.Mat(uploadedImage, faceROI);
         roi.copyTo(extractedFace);
         
-        // Create a mask for the face using a different approach to avoid constructor issues
-        // First create a ones matrix and then set all values to zero
+        // Create a mask for the face using a completely different approach
+        // Create a black image (all zeros) using a different method
         let mask = new cv.Mat();
-        mask = cv.Mat.ones(extractedFace.rows, extractedFace.cols, cv.CV_8UC1);
-        mask.setTo(new cv.Scalar(0));
+        cv.cvtColor(extractedFace, mask, cv.COLOR_RGBA2GRAY);
+        mask.setTo(new cv.Scalar(0)); // Set all pixels to black
         
-        // Get dimensions for ellipse
+        // Draw a filled white ellipse on the black background
         let center = new cv.Point(extractedFace.cols / 2, extractedFace.rows / 2);
         let axes = new cv.Point(extractedFace.cols * 0.4, extractedFace.rows * 0.45);
-        
-        // Draw ellipse on the mask
         cv.ellipse(mask, center, axes, 0, 0, 360, new cv.Scalar(255), -1);
         
         // Apply some feathering to the mask edges for smoother blending
