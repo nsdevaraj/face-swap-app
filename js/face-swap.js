@@ -30,8 +30,13 @@ function extractFaceFromUploadedImage(uploadedImage, faceRect) {
         let roi = new cv.Mat(uploadedImage, faceROI);
         roi.copyTo(extractedFace);
         
-        // Create a mask for the face (elliptical mask works better than rectangular)
-        let mask = new cv.Mat(extractedFace.rows, extractedFace.cols, cv.CV_8UC1, new cv.Scalar(0));
+        // Create a mask for the face using a different approach to avoid constructor issues
+        // First create a ones matrix and then set all values to zero
+        let mask = new cv.Mat();
+        mask = cv.Mat.ones(extractedFace.rows, extractedFace.cols, cv.CV_8UC1);
+        mask.setTo(new cv.Scalar(0));
+        
+        // Get dimensions for ellipse
         let center = new cv.Point(extractedFace.cols / 2, extractedFace.rows / 2);
         let axes = new cv.Point(extractedFace.cols * 0.4, extractedFace.rows * 0.45);
         
